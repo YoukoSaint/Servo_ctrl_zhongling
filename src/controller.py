@@ -204,6 +204,9 @@ class BasicController(QObject):
         except (ProtocolError, ValueError) as exc:
             self.log.error("move_to_angle: %s", exc)
             return False
+        if not self._client.ensure_mode(id, mode):
+            self.log.error("move_to_angle: 设置硬件模式失败 id=%d mode=%d", id, mode)
+            return False
         return self._client.move(id, pwm, time_ms)
 
     def move_to_pwm(self, id: int, pwm: int, time_ms: int = 1000) -> bool:
@@ -335,6 +338,12 @@ class LoopRunner(QObject):
             return False
         # 重新校验，防止调用方绕开 validate
         params.validate()
+        if not self._client.ensure_mode(params.servo_id, params.mode):
+            self.log.error(
+                "Loop start failed: cannot set hardware mode (id=%d, mode=%d)",
+                params.servo_id, params.mode,
+            )
+            return False
 
         self._params = params
         self._state = STATE_RUNNING
@@ -662,6 +671,12 @@ class SineRunner(QObject):
             self.log.warning("start() ignored: already running")
             return False
         params.validate()
+        if not self._client.ensure_mode(params.servo_id, params.mode):
+            self.log.error(
+                "Sine start failed: cannot set hardware mode (id=%d, mode=%d)",
+                params.servo_id, params.mode,
+            )
+            return False
         self._params = params
         self._state = STATE_RUNNING
         self._step = 0

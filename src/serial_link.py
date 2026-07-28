@@ -424,6 +424,9 @@ class ServoClient(QObject):
         self._reader: Optional[QTimer] = None
         self._health_timer: Optional[QTimer] = None
         self._poll_interval_ms = 20
+        # 当前连接期间由本应用确认过的硬件模式。断线后清空，避免设备重启后
+        # 继续沿用失效缓存。
+        self._configured_modes: dict[int, int] = {}
 
         # 诊断计数器
         self.tx_count = 0
@@ -486,6 +489,7 @@ class ServoClient(QObject):
         self.last_rx_ts = 0.0
         self.last_rx_frame_ts = 0.0
         self.last_tx_ts = 0.0
+        self._configured_modes.clear()
 
         self.connected.emit()
         _LOG.info("Transport connected: port=%s baud=%d kind=%s",
@@ -510,6 +514,7 @@ class ServoClient(QObject):
             except Exception as exc:  # noqa: BLE001
                 _LOG.warning("close() raised: %s", exc)
             self._transport = None
+        self._configured_modes.clear()
         self.disconnected.emit()
         _LOG.info("Disconnected from %s @ %d", self.port_name, self.baudrate)
         audit("disconnect", resource=self.port_name,
@@ -683,9 +688,18 @@ class ServoClient(QObject):
                            action="query_id", resource="servo:any")
 
     def set_mode(self, id_: int, mode: int) -> bool:
-        return self._write(cmd_set_mode(id_, mode),
-                           action="set_mode", resource=f"servo:{id_}",
-                           id=id_, mode=mode)
+        ok = self._write(cmd_set_mode(id_, mode),
+                         action="set_mode", resource=f"servo:{id_}",
+                         id=id_, mode=mode)
+        if ok:
+            self._configured_modes[id_] = int(mode)
+        return ok
+
+    def ensure_mode(self, id_: int, mode: int) -> bool:
+        """确保硬件模式与 UI 选择一致；同一连接中相同设置只发送一次。"""
+        if self._configured_modes.get(id_) == int(mode):
+            return True
+        return self.set_mode(id_, mode)
 
     def send_raw(self, frame: str) -> bool:
         """高频发送通道：只写串口不打 audit，专供 SineRunner 等高频步进。

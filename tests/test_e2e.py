@@ -280,6 +280,25 @@ class TestMockTransportRoundtrip(unittest.TestCase):
         client.disconnect()
 
 
+class TestHardwareModeSync(unittest.TestCase):
+    def test_same_mode_is_only_sent_once_per_connection(self):
+        from PyQt5.QtCore import QCoreApplication
+        from src.serial_link import MockTransport, ServoClient
+
+        _app = QCoreApplication.instance() or QCoreApplication(sys.argv)
+        client = ServoClient()
+        self.assertTrue(client.connect_transport(MockTransport(latency_ms=0)))
+        sent: list[str] = []
+        client.frame_sent.connect(sent.append)
+
+        self.assertTrue(client.ensure_mode(0, 1))
+        self.assertTrue(client.ensure_mode(0, 1))
+        self.assertTrue(client.ensure_mode(0, 3))
+
+        self.assertEqual(sent, ["#000PMOD1!", "#000PMOD3!"])
+        client.disconnect()
+
+
 if __name__ == "__main__":
     loader = unittest.TestLoader()
     suite = loader.loadTestsFromModule(__import__(__name__))

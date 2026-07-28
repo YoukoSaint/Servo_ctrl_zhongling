@@ -18,6 +18,11 @@ from src.controller import LoopParams, LoopRunner, STATE_COMPLETED
 class _RecordingClient:
     def __init__(self) -> None:
         self.moves: list[tuple[float, int, int, int]] = []
+        self.modes: list[tuple[int, int]] = []
+
+    def ensure_mode(self, servo_id: int, mode: int) -> bool:
+        self.modes.append((servo_id, mode))
+        return True
 
     def move(self, servo_id: int, pwm: int, action_ms: int) -> bool:
         self.moves.append((time.monotonic(), servo_id, pwm, action_ms))
@@ -58,6 +63,7 @@ class TestLinearTiming(unittest.TestCase):
 
         # 到起点、去终点、回起点，共 3 条运动指令。
         self.assertEqual(len(client.moves), 3)
+        self.assertEqual(client.modes, [(0, 1)])
         self.assertTrue(finished_at)
         self.assertEqual(runner.state, STATE_COMPLETED)
         self.assertTrue(all(move[3] == self.ACTION_MS for move in client.moves))
