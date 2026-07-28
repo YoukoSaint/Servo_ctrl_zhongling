@@ -20,14 +20,14 @@
 
 语义约定（已与产品确认）
 ----------------------
-- ``LoopParams.period_ms`` 是**单程时长**：从起点到终点，或从终点回到起点，
-  所花费的时间。完整一个来回 = ``2 × period_ms``。
-- ``LoopParams.cycles`` 的语义是"完整来回"次数：``cycles=1`` 表示**只走单程**
+- ``LoopParams.action_ms`` 是**单程动作时间**，``dwell_ms`` 是每次到达端点后的
+  停滞时间。完整一个来回 = ``2 × (action_ms + dwell_ms)``。
+- ``LoopParams.cycles`` 的语义是单程次数：``cycles=1`` 表示**只走单程**
   （去不回），``cycles=2`` 表示走 1 个完整来回后停在起点，``cycles=4`` 表示
   走 2 个完整来回，依此类推。``cycles`` 为奇数（如 3、5）时，最后一次会
   停在**终点**。
 - 起始角度 == 终止角度被视作零任务，直接判定为完成。
-- ``period_ms = 0`` 时，调用方按协议层 ``TIME_FAST=0``（最快速度）下发。
+- ``action_ms = 0`` 时，调用方按协议层 ``TIME_FAST=0``（最快速度）下发。
 - ``servo_id = 255``（广播）**不允许**用于循环控制：广播帧无应答会失去同步。
 
 日志约定
@@ -100,9 +100,11 @@ class LoopParams:
         servo_id:    舵机 ID，0–254。**不允许** 255（广播）。
         start_angle: 起始角度（度）。合法范围由 ``mode`` 决定。
         end_angle:   终止角度（度）。合法范围由 ``mode`` 决定。
-        period_ms:   单程时长（起点→终点 或 终点→起点），毫秒。0 表示按
+        action_ms:   单程动作时间（起点→终点 或 终点→起点），毫秒。0 表示按
                      ``TIME_FAST``（最快速度）下发。
-        cycles:      完整来回次数。``cycles=1`` 表示只走单程（去不回）。
+        dwell_ms:    每次到达起点或终点后的停滞时间，毫秒。0 表示不停滞。
+        cycles:      循环单程数。``cycles=1`` 表示去程，``cycles=2`` 表示一个
+                     完整往返；奇数时最终停在终点。
         mode:        270° 模式 (1/2) 或 180° 模式 (3/4)。其它模式（多圈/定时）
                      不支持角度循环。
     """
@@ -110,7 +112,8 @@ class LoopParams:
     servo_id: int
     start_angle: float
     end_angle: float
-    period_ms: int
+    action_ms: int
+    dwell_ms: int
     cycles: int
     mode: int = 1
 
@@ -142,10 +145,12 @@ class LoopParams:
             raise ValueError(
                 f"end_angle={self.end_angle} 超出 {ang_min}..{ang_max}"
             )
-        if not (0 <= self.period_ms <= TIME_MAX):
+        if not (0 <= self.action_ms <= TIME_MAX):
             raise ValueError(
-                f"period_ms={self.period_ms} 必须在 0..{TIME_MAX} 范围"
+                f"action_ms={self.action_ms} 必须在 0..{TIME_MAX} 范围"
             )
+        if not (0 <= self.dwell_ms <= 60000):
+            raise ValueError("dwell_ms 必须在 0..60000 范围")
         if self.cycles < 1:
             raise ValueError(f"cycles={self.cycles} 必须 >= 1（cycles=1 表示单程）")
 
@@ -256,8 +261,8 @@ class LoopRunner(QObject):
 
     工作流程：
         1. :meth:`start` 启动：先把舵机移动到起点。
-        2. 通过 :class:`QTimer` 单次定时器在 ``period_ms`` 后触发 :meth:`_advance`。
-        3. :meth:`_advance` 交替下发起点/终点 PWM，每次落位后切换半步计数。
+        2. 等待 ``action_ms + dwell_ms``，即动作完成并在端点停滞。
+        3. :meth:`_advance` 交替下发起点/终点 PWM，并累计已完成单程数。
         4. 达到 ``total_pairs`` 时进入 ``Completed``，发出 ``finished`` 信号。
         5. 任何时候可调用 :meth:`stop` 立即中止（会下发硬件 ``stop``）。
 
@@ -285,6 +290,7 @@ class LoopRunner(QObject):
         self._step: int = 0                 # 0 = 当前在起点准备去终点；1 = 在终点准备回起点
         self._pairs_done: int = 0           # 已完成的完整来回数
         self._total_pairs: int = 0          # 目标完整来回数
+        self._half_steps_done: int = 0      # 已下发的起点↔终点单程数
         self._t0: float = 0.0               # monotonic 起点
         self._advance_timer: QTimer | None = None
 
@@ -308,8 +314,8 @@ class LoopRunner(QObject):
         行为：
         - 若当前已在运行中，记录警告并直接返回 ``False``。
         - 若 ``start_angle == end_angle``，记日志后直接走完成路径。
-        - 状态机切到 ``Running``，先把舵机送到起点，再用 :class:`QTimer` 在
-          ``period_ms`` 后触发下一步。
+        - 状态机切到 ``Running``，先把舵机送到起点，等待动作和停滞完成后
+          再触发下一步。
 
         Args:
             params: 已填写好的循环参数。建议先调用 :meth:`LoopParams.validate`，
@@ -334,22 +340,25 @@ class LoopRunner(QObject):
         self._state = STATE_RUNNING
         self._step = 0
         self._pairs_done = 0
+        self._half_steps_done = 0
         # cycles=1 -> 单程；cycles=2 -> 1 个完整来回；cycles=N -> N//2 个完整来回
         self._total_pairs = params.cycles // 2
         self._t0 = time.monotonic()
 
         # ---- START 日志（含量化指标） --------------------------------
         self.log.info(
-            "Loop started (id=%d, start=%.2f° -> end=%.2f°, period=%dms, "
-            "cycles=%d [=>%d pairs], mode=%d)",
+            "Loop started (id=%d, start=%.2f° -> end=%.2f°, action=%dms, "
+            "dwell=%dms, cycles=%d [=>%d pairs], mode=%d)",
             params.servo_id, params.start_angle, params.end_angle,
-            params.period_ms, params.cycles, self._total_pairs, params.mode,
+            params.action_ms, params.dwell_ms, params.cycles,
+            self._total_pairs, params.mode,
         )
         audit(
             "loop_start",
             resource=f"servo:{params.servo_id}",
             id=params.servo_id, start_angle=params.start_angle,
-            end_angle=params.end_angle, period_ms=params.period_ms,
+            end_angle=params.end_angle, action_ms=params.action_ms,
+            dwell_ms=params.dwell_ms,
             cycles=params.cycles, mode=params.mode,
         )
         self.state_changed.emit(self._state)
@@ -370,13 +379,13 @@ class LoopRunner(QObject):
         except (ProtocolError, ValueError) as exc:
             self._abort(f"angle_to_pwm failed: {exc}")
             return False
-        time_ms = _safe_time_ms(params.period_ms)
+        time_ms = _safe_time_ms(params.action_ms)
         if not self._client.move(params.servo_id, pwm0, time_ms):
             self._abort(f"move(start) failed for id={params.servo_id}")
             return False
 
-        # 然后等 period_ms 后走下一步
-        self._schedule_advance(params.period_ms)
+        # 先完成到起点的动作和端点停滞，再开始第一个循环单程。
+        self._schedule(self._advance, params.action_ms + params.dwell_ms)
         return True
 
     def stop(self) -> None:
@@ -414,13 +423,13 @@ class LoopRunner(QObject):
 
     # ---- 内部：定时器推进 -------------------------------------------------
 
-    def _schedule_advance(self, period_ms: int) -> None:
-        """挂一个 ``period_ms`` 后的单次定时器到 :meth:`_advance`。"""
+    def _schedule(self, callback: Any, delay_ms: int) -> None:
+        """在指定延迟后执行下一程或完成回调。"""
         self._cancel_timer()
         timer = QTimer(self)
         timer.setSingleShot(True)
-        timer.timeout.connect(self._advance)
-        timer.start(max(0, int(period_ms)))
+        timer.timeout.connect(callback)
+        timer.start(max(0, int(delay_ms)))
         self._advance_timer = timer
 
     def _cancel_timer(self) -> None:
@@ -449,7 +458,7 @@ class LoopRunner(QObject):
         except (ProtocolError, ValueError) as exc:
             self._abort(f"angle_to_pwm failed: {exc}")
             return
-        time_ms = _safe_time_ms(p.period_ms)
+        time_ms = _safe_time_ms(p.action_ms)
 
         ok = self._client.move(p.servo_id, pwm, time_ms)
         if not ok:
@@ -458,19 +467,19 @@ class LoopRunner(QObject):
             )
             return
 
-        # 半步切换：step 0 -> 1 时刚发出"去终点"；step 1 -> 0 时刚发出"回起点"，
-        # 此时算完成 1 个完整来回。
+        # 半步切换：step 0 -> 1 时刚发出"去终点"；step 1 -> 0 时刚发出"回起点"。
+        self._half_steps_done += 1
         self._step ^= 1
         if self._step == 0:
             self._pairs_done += 1
             self.progress.emit(self._pairs_done, self._total_pairs)
-            if self._pairs_done >= self._total_pairs:
-                # 当前这一帧已下发，让它跑完，结算时再算完成
-                self._finish()
-                return
 
-        # 继续下一次
-        self._schedule_advance(p.period_ms)
+        delay_ms = p.action_ms + p.dwell_ms
+        if self._half_steps_done >= p.cycles:
+            # 最后一程也必须等动作和端点停滞都完成后才标记 Completed。
+            self._schedule(self._finish, delay_ms)
+        else:
+            self._schedule(self._advance, delay_ms)
 
     # ---- 内部：完成 / 中止 ------------------------------------------------
 
@@ -480,21 +489,21 @@ class LoopRunner(QObject):
         if self._params is None:
             return
         elapsed = time.monotonic() - self._t0
-        # 预期耗时：实际半步数 * period_ms，转换成秒
-        # _total_pairs = cycles // 2；当 cycles 为奇数时还多走了 1 个"去终点"半步
-        half_steps_done = self._pairs_done * 2
-        if (self._params.cycles % 2) == 1:
-            half_steps_done += 1
-        expected = half_steps_done * self._params.period_ms / 1000.0
+        # 包含启动时先移动到起点，以及每次到达端点后的停滞。
+        expected = (
+            (self._half_steps_done + 1)
+            * (self._params.action_ms + self._params.dwell_ms)
+            / 1000.0
+        )
         drift = ((elapsed - expected) / expected * 100.0) if expected > 0 else 0.0
 
         # ---- STOP 日志（含量化指标） ---------------------------------
         self.log.info(
             "Loop completed: %d/%d pairs in %.2fs "
-            "(target=%.2fs, drift=%+.1f%%, id=%d, period=%dms)",
+            "(target=%.2fs, drift=%+.1f%%, id=%d, action=%dms, dwell=%dms)",
             self._pairs_done, self._total_pairs,
             elapsed, expected, drift,
-            self._params.servo_id, self._params.period_ms,
+            self._params.servo_id, self._params.action_ms, self._params.dwell_ms,
         )
         audit(
             "loop_completed",
@@ -552,13 +561,13 @@ class LoopRunner(QObject):
 # ---------------------------------------------------------------------------
 
 
-def _safe_time_ms(period_ms: int) -> int:
-    """把 ``period_ms`` 限制到协议层允许的 [0, TIME_MAX] 范围。"""
-    if period_ms < TIME_FAST:
+def _safe_time_ms(action_ms: int) -> int:
+    """把动作时间限制到协议层允许的 [0, TIME_MAX] 范围。"""
+    if action_ms < TIME_FAST:
         return TIME_FAST
-    if period_ms > TIME_MAX:
+    if action_ms > TIME_MAX:
         return TIME_MAX
-    return int(period_ms)
+    return int(action_ms)
 
 @dataclass
 class SineParams:

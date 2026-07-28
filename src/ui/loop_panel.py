@@ -3,7 +3,8 @@
 
 输入：
     - 循环次数  (QSpinBox, 1–9999) — ``cycles``（1 = 单程；2 = 1 个完整来回）
-    - 单程时长  (QSpinBox, 1–60000 ms) — ``period_ms``，标签为 "单程时长 (ms)"
+    - 动作时间  (QSpinBox, 0–9999 ms) — 线性单程运动耗时
+    - 停滞时间  (QSpinBox, 0–60000 ms) — 线性运动到端点后的等待时间
     - 起始角度  (QDoubleSpinBox, -135..+135) — ``start_angle``
     - 终止角度  (QDoubleSpinBox, -135..+135) — ``end_angle``
     - 舵机 ID   (QSpinBox, 0–254) —— 255 广播禁用
@@ -127,7 +128,8 @@ class LoopPanel(QWidget):
 
         form = QFormLayout()
         form.addRow("循环次数：", self._cycles_spin)
-        form.addRow("周期时长 (ms)：", self._period_spin)
+        self._period_label = QLabel("动作时间 (ms)：")
+        form.addRow(self._period_label, self._period_spin)
         form.addRow("舵机 ID：", self._id_spin)
         form.addRow("工作模式：", self._mode_combo)
         root.addLayout(form)
@@ -150,6 +152,13 @@ class LoopPanel(QWidget):
         self._end_angle.setSuffix(" °")
         self._end_angle.setValue(90.0)
         lf.addRow("终止角度：", self._end_angle)
+
+        self._dwell_spin = QSpinBox()
+        self._dwell_spin.setRange(0, 60000)
+        self._dwell_spin.setValue(0)
+        self._dwell_spin.setSuffix(" ms")
+        self._dwell_spin.setToolTip("每次动作到达起点或终点后等待的时间")
+        lf.addRow("停滞时间：", self._dwell_spin)
         root.addWidget(self._linear_group)
 
         # ── 正弦曲线参数子组（初始隐藏）──
@@ -188,6 +197,11 @@ class LoopPanel(QWidget):
         self._linear_group.setVisible(not is_sine)
         self._sine_group.setVisible(is_sine)
         self._cycles_spin.setSuffix(" 个周期" if is_sine else " 次")
+        self._period_label.setText("周期时长 (ms)：" if is_sine else "动作时间 (ms)：")
+        if is_sine:
+            self._period_spin.setRange(100, 60000)
+        else:
+            self._period_spin.setRange(0, 9999)
 
     def _build_control_group(self) -> QGroupBox:
         gb = QGroupBox("控制")
@@ -324,7 +338,8 @@ class LoopPanel(QWidget):
                 servo_id=self._id_spin.value(),
                 start_angle=self._start_angle.value(),
                 end_angle=self._end_angle.value(),
-                period_ms=self._period_spin.value(),
+                action_ms=self._period_spin.value(),
+                dwell_ms=self._dwell_spin.value(),
                 cycles=self._cycles_spin.value(),
                 mode=self._mode_combo.currentData(),
             )
@@ -341,7 +356,8 @@ class LoopPanel(QWidget):
         if self._runner.start(params):
             self._set_running_ui(False, True)
             return True, (
-                f"[loop] 启动：{params.cycles} 来回 × {params.period_ms}ms，"
+                f"[loop] 启动：{params.cycles} 程，动作 {params.action_ms}ms + "
+                f"停滞 {params.dwell_ms}ms，"
                 f"ID={params.servo_id}, {params.start_angle:+.1f}°→{params.end_angle:+.1f}°"
             )
         return False, "[loop] 启动失败，运动指令未成功发送"
@@ -452,6 +468,7 @@ class LoopPanel(QWidget):
         for w in (
             self._cycles_spin, self._period_spin,
             self._start_angle, self._end_angle,
+            self._dwell_spin,
             self._sine_amplitude, self._sine_center, self._sine_steps,
             self._id_spin, self._mode_combo,
         ):

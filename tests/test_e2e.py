@@ -144,7 +144,8 @@ class TestLoopParams(unittest.TestCase):
     def test_valid(self):
         from src.controller import LoopParams
         p = LoopParams(
-            servo_id=1, start_angle=0, end_angle=90, period_ms=1000, cycles=4, mode=1
+            servo_id=1, start_angle=0, end_angle=90,
+            action_ms=1000, dwell_ms=250, cycles=4, mode=1
         )
         # validate() 应当不抛错
         p.validate()
@@ -155,19 +156,19 @@ class TestLoopParams(unittest.TestCase):
         with self.assertRaises(ValueError):
             LoopParams(
                 servo_id=255, start_angle=0, end_angle=90,
-                period_ms=1000, cycles=4, mode=1
+                action_ms=1000, dwell_ms=0, cycles=4, mode=1
             ).validate()
         # 越界 256
         with self.assertRaises(ValueError):
             LoopParams(
                 servo_id=256, start_angle=0, end_angle=90,
-                period_ms=1000, cycles=4, mode=1
+                action_ms=1000, dwell_ms=0, cycles=4, mode=1
             ).validate()
         # 负 ID
         with self.assertRaises(ValueError):
             LoopParams(
                 servo_id=-1, start_angle=0, end_angle=90,
-                period_ms=1000, cycles=4, mode=1
+                action_ms=1000, dwell_ms=0, cycles=4, mode=1
             ).validate()
 
     def test_invalid_angle(self):
@@ -176,13 +177,26 @@ class TestLoopParams(unittest.TestCase):
         with self.assertRaises(ValueError):
             LoopParams(
                 servo_id=1, start_angle=200, end_angle=0,
-                period_ms=1000, cycles=4, mode=1
+                action_ms=1000, dwell_ms=0, cycles=4, mode=1
             ).validate()
         # 180° 模式（mode=3）起止角度必须在 ±90°
         with self.assertRaises(ValueError):
             LoopParams(
                 servo_id=1, start_angle=0, end_angle=120,
-                period_ms=1000, cycles=4, mode=3
+                action_ms=1000, dwell_ms=0, cycles=4, mode=3
+            ).validate()
+
+    def test_invalid_timing(self):
+        from src.controller import LoopParams
+        with self.assertRaises(ValueError):
+            LoopParams(
+                servo_id=1, start_angle=0, end_angle=90,
+                action_ms=10000, dwell_ms=0, cycles=2, mode=1
+            ).validate()
+        with self.assertRaises(ValueError):
+            LoopParams(
+                servo_id=1, start_angle=0, end_angle=90,
+                action_ms=1000, dwell_ms=60001, cycles=2, mode=1
             ).validate()
 
 
@@ -194,8 +208,8 @@ class TestMockTransportRoundtrip(unittest.TestCase):
     """完整跑通 ``MockTransport`` + ``ServoClient`` + ``LoopRunner``。"""
 
     CYCLES = 2
-    PERIOD_MS = 200
-    RUN_BUDGET_MS = (CYCLES * 2 * PERIOD_MS) + 1500  # ≈ 2.3s
+    ACTION_MS = 200
+    RUN_BUDGET_MS = ((CYCLES + 1) * ACTION_MS) + 1500
 
     def test_loop_completes(self):
         try:
@@ -233,7 +247,8 @@ class TestMockTransportRoundtrip(unittest.TestCase):
             servo_id=1,
             start_angle=0,
             end_angle=90,
-            period_ms=self.PERIOD_MS,
+            action_ms=self.ACTION_MS,
+            dwell_ms=0,
             cycles=self.CYCLES,
             mode=1,
         )
@@ -248,11 +263,11 @@ class TestMockTransportRoundtrip(unittest.TestCase):
 
         # 3) 验证
         # MockTransport 对运动指令返回 echo（#...!...），并非 #OK!。
-        # 因此只能断言收到至少 CYCLES*2 个帧（每程一帧）+ 状态走完 COMPLETED。
+        # 初始到起点 1 帧，之后每个单程 1 帧。
         self.assertGreaterEqual(
             len(received),
-            self.CYCLES * 2,
-            f"期望至少 {self.CYCLES * 2} 个应答帧，实际收到 {len(received)}",
+            self.CYCLES + 1,
+            f"期望至少 {self.CYCLES + 1} 个应答帧，实际收到 {len(received)}",
         )
         self.assertEqual(
             runner.state,
