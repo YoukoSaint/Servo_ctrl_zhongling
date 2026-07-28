@@ -18,9 +18,10 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Optional
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QCloseEvent
 from PyQt5.QtWidgets import (
     QApplication,
@@ -37,6 +38,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ..controller import BasicController
+from ..http_api import StartResult
 from ..serial_link import ServoClient
 from ..theme import get_stylesheet
 from .connection_panel import ConnectionPanel
@@ -51,6 +53,8 @@ _LOG = logging.getLogger(__name__)
 class MainWindow(QMainWindow):
     """主窗口。"""
 
+    _api_start_requested = pyqtSignal(object)
+
     WINDOW_TITLE = "舵机控制上位机 — ZL Servo Control"
     DEFAULT_SIZE = (1400, 900)
     MIN_SIZE = (1024, 680)
@@ -63,6 +67,7 @@ class MainWindow(QMainWindow):
 
         self._client: Optional[ServoClient] = None
         self._controller: Optional[BasicController] = None
+        self._api_start_requested.connect(self._handle_api_start_request)
 
         # ---- 控件 ----
         self._log_panel = LogPanel()
@@ -234,6 +239,33 @@ class MainWindow(QMainWindow):
     def _show_message(self, msg: str) -> None:
         # 显示 5 秒，避免快速刷新遮挡
         self.statusBar().showMessage(msg, 5000)
+
+    def request_start_from_http(self, timeout: float = 4.0) -> StartResult:
+        """从 HTTP 线程请求 Qt 主线程使用当前循环参数启动。"""
+        request_state = {
+            "event": threading.Event(),
+            "result": None,
+        }
+        self._api_start_requested.emit(request_state)
+        if not request_state["event"].wait(timeout):
+            raise TimeoutError("Qt 主线程未在规定时间内处理启动指令")
+        result = request_state["result"]
+        if not isinstance(result, StartResult):
+            raise RuntimeError("Qt 主线程返回了无效的启动结果")
+        return result
+
+    def _handle_api_start_request(self, request_state: dict[str, object]) -> None:
+        try:
+            accepted, message = self._loop_panel.start_from_current_settings()
+            request_state["result"] = StartResult(accepted, message)
+            self._show_message(f"[HTTP API] {message}")
+        except Exception as exc:  # noqa: BLE001
+            _LOG.exception("handling HTTP start request failed")
+            request_state["result"] = StartResult(False, f"启动失败: {exc}")
+        finally:
+            event = request_state.get("event")
+            if isinstance(event, threading.Event):
+                event.set()
 
     # ----------------------------------------------------------- 折叠
 

@@ -301,19 +301,24 @@ class LoopPanel(QWidget):
                 spin.setValue(hi)
 
     def _on_start_clicked(self) -> None:
+        _accepted, message = self.start_from_current_settings()
+        self.status_message.emit(message)
+
+    def start_from_current_settings(self) -> tuple[bool, str]:
+        """使用当前 UI 参数启动，供按钮和本地 HTTP API 共用。"""
         if self._controller is None:
-            self.status_message.emit("[loop] 未连接，无法启动")
-            return
+            return False, "[loop] 未连接，无法启动"
         is_sine = self._loop_mode_combo.currentData() == "sine"
 
         if is_sine:
-            self._start_sine()
-        else:
-            self._start_linear()
+            return self._start_sine()
+        return self._start_linear()
 
-    def _start_linear(self) -> None:
-        if self._runner is None or self._runner.is_running:
-            return
+    def _start_linear(self) -> tuple[bool, str]:
+        if self._runner is None:
+            return False, "[loop] 控制器未就绪"
+        if self._runner.is_running:
+            return False, "[loop] 线性往复已在运行"
         try:
             params = LoopParams(
                 servo_id=self._id_spin.value(),
@@ -325,8 +330,7 @@ class LoopPanel(QWidget):
             )
             params.validate()
         except ValueError as exc:
-            self.status_message.emit(f"[loop] 参数错误：{exc}")
-            return
+            return False, f"[loop] 参数错误：{exc}"
 
         total_pairs = params.cycles // 2
         self._progress.setRange(0, max(1, total_pairs))
@@ -336,14 +340,17 @@ class LoopPanel(QWidget):
 
         if self._runner.start(params):
             self._set_running_ui(False, True)
-            self.status_message.emit(
+            return True, (
                 f"[loop] 启动：{params.cycles} 来回 × {params.period_ms}ms，"
                 f"ID={params.servo_id}, {params.start_angle:+.1f}°→{params.end_angle:+.1f}°"
             )
+        return False, "[loop] 启动失败，运动指令未成功发送"
 
-    def _start_sine(self) -> None:
-        if self._sine_runner is None or self._sine_runner.is_running:
-            return
+    def _start_sine(self) -> tuple[bool, str]:
+        if self._sine_runner is None:
+            return False, "[sine] 控制器未就绪"
+        if self._sine_runner.is_running:
+            return False, "[sine] 正弦运动已在运行"
         try:
             params = SineParams(
                 servo_id=self._id_spin.value(),
@@ -356,8 +363,7 @@ class LoopPanel(QWidget):
             )
             params.validate()
         except ValueError as exc:
-            self.status_message.emit(f"[sine] 参数错误：{exc}")
-            return
+            return False, f"[sine] 参数错误：{exc}"
 
         total_steps = params.steps * params.cycles if params.cycles > 0 else params.steps * 10
         self._progress.setRange(0, max(1, total_steps))
@@ -367,11 +373,12 @@ class LoopPanel(QWidget):
 
         if self._sine_runner.start(params):
             self._set_running_ui(False, True)
-            self.status_message.emit(
+            return True, (
                 f"[sine] 启动：振幅={params.amplitude:.1f}° "
                 f"中心={params.center_angle:.1f}° "
                 f"周期={params.period_ms}ms × {params.cycles}"
             )
+        return False, "[sine] 启动失败，运动指令未成功发送"
 
     def _on_stop_clicked(self) -> None:
         stopped = False

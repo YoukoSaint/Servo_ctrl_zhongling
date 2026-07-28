@@ -1,3 +1,5 @@
 logs
 src/logs
 .idea
+__pycache__/
+*.py[cod]
